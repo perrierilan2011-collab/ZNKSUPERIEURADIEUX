@@ -1,0 +1,2178 @@
+local success, err = pcall(function()
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local CoreGuiService = game:GetService("CoreGui")
+local LogService = game:GetService("LogService")
+local VirtualUser = game:GetService("VirtualUser")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+local SaveManager = {}
+SaveManager.Folder = "MenuConfig"
+SaveManager.File = "Config.json"
+
+function SaveManager:GetPath()
+    return self.Folder .. "/" .. self.File
+end
+
+function SaveManager:Save(config)
+    local json = game:GetService("HttpService"):JSONEncode(config)
+    if writefile then
+        if not isfolder(self.Folder) then makefolder(self.Folder) end
+        writefile(self:GetPath(), json)
+    end
+end
+
+function SaveManager:Load()
+    if readfile and isfile(self:GetPath()) then
+        local ok, result = pcall(function()
+            return game:GetService("HttpService"):JSONDecode(readfile(self:GetPath()))
+        end)
+        if ok then return result end
+    end
+    return nil
+end
+
+-- =====================================================
+-- CONFIGS
+-- =====================================================
+
+local InvisibilityConfig = { Enabled = false, ExcludedPlayers = {} }
+
+local MovementConfig = {
+    Speed = false,
+    SpeedValue = 16,
+    SpeedCurrent = 16,
+    Jump = false,
+    JumpValue = 50,
+    InfiniteJump = false,
+    Noclip = false,
+    Fly = false,
+    FlySpeed = 50,
+    AntiAfk = false,
+}
+
+local CheckpointCFrame = nil
+
+local RemoteHitConfig = {
+    Damage = 25,
+    Repeats = 1,
+}
+
+local AntiKickConfig = { Enabled = false }
+
+local AutoFarmConfig = {
+    BaseCFrame = nil,
+    ExclusionRadius = 60,
+}
+
+local StaminaFixConfig = { Enabled = true }
+
+local EggWindowConfig = { Enabled = false }
+local EggWindowState = {
+    DisplayedEggs = {}, -- [instance] = button
+    EntriesOrder = {},  -- liste triee par priorite {instance, button, priority, name}
+    BetterFilterEnabled = false,
+}
+
+-- Forward declarations
+local UpdateEggWindowEntryRarity
+local AddEggWindowEntry
+
+-- =====================================================
+-- SAVE / LOAD
+-- =====================================================
+
+local function LoadSavedConfig()
+    local saved = SaveManager:Load()
+    if not saved then return end
+    if saved.Movement then
+        for k, v in pairs(saved.Movement) do
+            if MovementConfig[k] ~= nil then MovementConfig[k] = v end
+        end
+    end
+    if saved.AntiKick then
+        AntiKickConfig.Enabled = saved.AntiKick.Enabled or false
+    end
+    if saved.StaminaFix then
+        StaminaFixConfig.Enabled = saved.StaminaFix.Enabled ~= false
+    end
+end
+
+local function SaveCurrentConfig()
+    local config = {
+        Movement = {
+            Speed=MovementConfig.Speed, SpeedValue=MovementConfig.SpeedValue,
+            Jump=MovementConfig.Jump, JumpValue=MovementConfig.JumpValue,
+            InfiniteJump=MovementConfig.InfiniteJump, Noclip=MovementConfig.Noclip,
+            Fly=MovementConfig.Fly, FlySpeed=MovementConfig.FlySpeed, AntiAfk=MovementConfig.AntiAfk,
+        },
+        AntiKick = { Enabled = AntiKickConfig.Enabled },
+        StaminaFix = { Enabled = StaminaFixConfig.Enabled },
+    }
+    SaveManager:Save(config)
+end
+
+LoadSavedConfig()
+
+task.spawn(function()
+    while true do task.wait(30) SaveCurrentConfig() end
+end)
+
+-- =====================================================
+-- REMOTES SCAN
+-- =====================================================
+
+local function ScanAllRemotes()
+    local remotes = {}
+    local function scan(obj)
+        for _, child in pairs(obj:GetChildren()) do
+            if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+                table.insert(remotes, child)
+            end
+            scan(child)
+        end
+    end
+    scan(game)
+    return remotes
+end
+
+-- =====================================================
+-- FIX ENDURANCE / STAMINA APRES TELEPORTATION
+-- =====================================================
+
+local STAMINA_KEYWORDS = {"stamina", "endurance", "energy"}
+
+local function TrySetNumericAttribute(obj)
+    if not obj then return end
+    pcall(function()
+        local attrs = obj:GetAttributes()
+        for k, v in pairs(attrs) do
+            local kl = tostring(k):lower()
+            if typeof(v) == "number" then
+                for _, kw in pairs(STAMINA_KEYWORDS) do
+                    if kl:find(kw) then
+                        pcall(function() obj:SetAttribute(k, 90) end)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function TrySetValueObjects(container)
+    if not container then return end
+    pcall(function()
+        for _, child in pairs(container:GetDescendants()) do
+            if child:IsA("NumberValue") or child:IsA("IntValue") then
+                local nl = child.Name:lower()
+                for _, kw in pairs(STAMINA_KEYWORDS) do
+                    if nl:find(kw) then
+                        pcall(function() child.Value = 90 end)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function FixStaminaAfterTeleport()
+    if not StaminaFixConfig.Enabled then return end
+    pcall(function()
+        TrySetNumericAttribute(LocalPlayer)
+        TrySetNumericAttribute(LocalPlayer.Character)
+
+        TrySetValueObjects(LocalPlayer)
+        if LocalPlayer.Character then TrySetValueObjects(LocalPlayer.Character) end
+
+        local ls = LocalPlayer:FindFirstChild("leaderstats")
+        if ls then TrySetValueObjects(ls) end
+
+        for _, folderName in pairs({"Stats","PlayerData","Data","PlayerStats"}) do
+            local f = LocalPlayer:FindFirstChild(folderName)
+            if f then TrySetValueObjects(f) end
+        end
+
+        local remotes = ScanAllRemotes()
+        for _, r in pairs(remotes) do
+            local nl = r.Name:lower()
+            for _, kw in pairs(STAMINA_KEYWORDS) do
+                if nl:find(kw) then
+                    pcall(function()
+                        if r:IsA("RemoteEvent") then
+                            r:FireServer(90)
+                        elseif r:IsA("RemoteFunction") then
+                            r:InvokeServer(90)
+                        end
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+-- =====================================================
+-- TELEPORT SYSTEM
+-- =====================================================
+
+local function SafeTeleport(targetCFrame)
+    local character = LocalPlayer.Character
+    if not character then return false end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local parts = {}
+    for _, part in pairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then parts[part] = part.CanCollide part.CanCollide = false end
+    end
+    root.AssemblyLinearVelocity = Vector3.new(0,0,0)
+    for i = 1, 5 do root.CFrame = targetCFrame task.wait(0.05) end
+    task.wait(0.2)
+    for part, col in pairs(parts) do pcall(function() part.CanCollide = col end) end
+
+    FixStaminaAfterTeleport()
+    task.spawn(function()
+        task.wait(0.5)
+        FixStaminaAfterTeleport()
+    end)
+
+    return true
+end
+
+local function SafeTeleportToPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return false end
+    return SafeTeleport(CFrame.new(targetRoot.CFrame.Position + targetRoot.CFrame.RightVector * 3 + Vector3.new(0,0.5,0)))
+end
+
+local function SafeBringPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local myChar = LocalPlayer.Character
+    if not myChar then return false end
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return false end
+    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return false end
+    local parts = {}
+    for _, part in pairs(targetPlayer.Character:GetDescendants()) do
+        if part:IsA("BasePart") then parts[part] = part.CanCollide part.CanCollide = false end
+    end
+    targetRoot.AssemblyLinearVelocity = Vector3.new(0,0,0)
+    local dest = myRoot.CFrame * CFrame.new(0,0,3)
+    for i = 1, 5 do targetRoot.CFrame = dest task.wait(0.05) end
+    task.wait(0.3)
+    for part, col in pairs(parts) do pcall(function() part.CanCollide = col end) end
+    return true
+end
+
+-- =====================================================
+-- KILL UNIVERSAL
+-- =====================================================
+
+local function FindRemoteEvent(name)
+    local function search(obj)
+        for _, child in pairs(obj:GetChildren()) do
+            if child:IsA("RemoteEvent") and child.Name:lower():find(name:lower()) then return child end
+            local found = search(child)
+            if found then return found end
+        end
+    end
+    return search(game)
+end
+
+local function FindRemoteFunction(name)
+    local function search(obj)
+        for _, child in pairs(obj:GetChildren()) do
+            if child:IsA("RemoteFunction") and child.Name:lower():find(name:lower()) then return child end
+            local found = search(child)
+            if found then return found end
+        end
+    end
+    return search(game)
+end
+
+local function KillPlayerUniversal(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local damageRemote = FindRemoteEvent("Damage") or FindRemoteEvent("TakeDamage") or FindRemoteEvent("Hit") or FindRemoteEvent("Attack")
+    if damageRemote then pcall(function() damageRemote:FireServer(targetPlayer, 999999) end) end
+    local killRemote = FindRemoteEvent("Kill") or FindRemoteEvent("Death") or FindRemoteEvent("OnDeath")
+    if killRemote then pcall(function() killRemote:FireServer(targetPlayer) end) end
+    local damageFunc = FindRemoteFunction("Damage") or FindRemoteFunction("TakeDamage")
+    if damageFunc then pcall(function() damageFunc:InvokeServer(targetPlayer, 999999) end) end
+    pcall(function()
+        local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+        if humanoid then humanoid.Health = 0 end
+    end)
+    local function searchAndFire(obj)
+        for _, child in pairs(obj:GetChildren()) do
+            if child:IsA("RemoteEvent") then
+                pcall(function() child:FireServer(targetPlayer, 999999) end)
+                pcall(function() child:FireServer(targetPlayer) end)
+            end
+            searchAndFire(child)
+        end
+    end
+    searchAndFire(game)
+    return true
+end
+
+-- =====================================================
+-- REMOTE HIT SYSTEM
+-- =====================================================
+
+local function RemoteHitPlayer(targetPlayer, damage)
+    if not targetPlayer or not targetPlayer.Character then return 0 end
+    local char = targetPlayer.Character
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    local humanoid = char:FindFirstChild("Humanoid")
+    if not root then return 0 end
+
+    local fired = 0
+    local hitPatterns = {}
+
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(targetPlayer) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(targetPlayer, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(char, damage) end end)
+    table.insert(hitPatterns, function(r) if humanoid and r:IsA("RemoteEvent") then r:FireServer(humanoid, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(root, damage) end end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then
+            r:FireServer({Target=targetPlayer, Damage=damage, Hit=root, Position=root.Position})
+        end
+    end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then r:FireServer({Character=char, Damage=damage, Part=root}) end
+    end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(root.Position, targetPlayer, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(targetPlayer, root.Position, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(root) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteFunction") then pcall(function() r:InvokeServer(targetPlayer, damage) end) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteFunction") then pcall(function() r:InvokeServer({Target=targetPlayer, Damage=damage, Hit=root}) end) end end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then
+            r:FireServer({Instance=root, Position=root.Position, Normal=Vector3.new(0,1,0), Material=Enum.Material.SmoothPlastic}, damage)
+        end
+    end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then
+            r:FireServer("Hit", targetPlayer, damage)
+            r:FireServer("Damage", targetPlayer, damage)
+            r:FireServer("Attack", targetPlayer, damage)
+        end
+    end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(targetPlayer.UserId, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(targetPlayer, root, damage) end end)
+    table.insert(hitPatterns, function(r) if r:IsA("RemoteEvent") then r:FireServer(root, targetPlayer, damage) end end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then
+            r:FireServer({Player=targetPlayer, Character=char, HitPart=root, HitPosition=root.Position, Damage=damage})
+        end
+    end)
+    table.insert(hitPatterns, function(r)
+        if r:IsA("RemoteEvent") then r:FireServer(targetPlayer, {Damage=damage, Part=root, Position=root.Position}) end
+    end)
+
+    local allRemotes = ScanAllRemotes()
+    local hitKeywords = {
+        "hit","damage","hurt","attack","swing","melee","strike","punch","kick",
+        "bat","sword","knife","gun","shoot","fire","blast","smash","bash",
+        "dps","dealdamage","takedamage","onhit","onattack","dmg","dealDmg",
+        "ragdoll","stun","knockback","wound","injure","combat","fight","weapon",
+        "tool","slash","stab","shoot","bullet","projectile"
+    }
+
+    local priorityRemotes = {}
+    local otherRemotes = {}
+
+    for _, remote in pairs(allRemotes) do
+        local nameLower = remote.Name:lower()
+        local isPriority = false
+        for _, kw in pairs(hitKeywords) do
+            if nameLower:find(kw) then isPriority = true break end
+        end
+        if isPriority then table.insert(priorityRemotes, remote)
+        else table.insert(otherRemotes, remote) end
+    end
+
+    for _, remote in pairs(priorityRemotes) do
+        for _, pattern in pairs(hitPatterns) do
+            pcall(pattern, remote)
+            fired = fired + 1
+        end
+    end
+
+    for _, remote in pairs(otherRemotes) do
+        pcall(function()
+            if remote:IsA("RemoteEvent") then
+                remote:FireServer(targetPlayer, damage)
+                remote:FireServer(char, damage)
+                remote:FireServer(root, damage)
+                remote:FireServer(targetPlayer)
+            end
+        end)
+        fired = fired + 1
+    end
+
+    pcall(function()
+        if humanoid then humanoid.Health = math.max(0, humanoid.Health - damage) end
+    end)
+
+    return fired
+end
+
+local RemoteHitActive = false
+
+local function StartRemoteHit(targetPlayer, damage, repeats)
+    if RemoteHitActive then return end
+    RemoteHitActive = true
+    task.spawn(function()
+        for i = 1, repeats do
+            if not RemoteHitActive then break end
+            RemoteHitPlayer(targetPlayer, damage)
+            if repeats > 1 then task.wait(0.08) end
+        end
+        RemoteHitActive = false
+    end)
+end
+
+-- =====================================================
+-- FPS COUNTER (en haut au centre)
+-- =====================================================
+
+local FPSGui = Instance.new("ScreenGui")
+FPSGui.Name = "FPSCounterGui"
+FPSGui.ResetOnSpawn = false
+FPSGui.IgnoreGuiInset = true
+FPSGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() FPSGui.Parent = CoreGuiService end)
+if not FPSGui.Parent then FPSGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local FPSFrame = Instance.new("Frame")
+FPSFrame.Name = "FPSFrame"
+FPSFrame.Size = UDim2.new(0, 160, 0, 36)
+FPSFrame.Position = UDim2.new(0.5, -80, 0, 8)
+FPSFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 22)
+FPSFrame.BackgroundTransparency = 0.3
+FPSFrame.BorderSizePixel = 0
+FPSFrame.Active = true
+FPSFrame.Parent = FPSGui
+
+local FPSCorner = Instance.new("UICorner")
+FPSCorner.CornerRadius = UDim.new(0, 8)
+FPSCorner.Parent = FPSFrame
+
+local FPSStroke = Instance.new("UIStroke")
+FPSStroke.Color = Color3.fromRGB(80, 80, 90)
+FPSStroke.Thickness = 1
+FPSStroke.Transparency = 0.3
+FPSStroke.Parent = FPSFrame
+
+local FPSText = Instance.new("TextLabel")
+FPSText.Size = UDim2.new(1, 0, 1, 0)
+FPSText.BackgroundTransparency = 1
+FPSText.Text = "60 FPS"
+FPSText.TextColor3 = Color3.fromRGB(255, 255, 255)
+FPSText.TextSize = 16
+FPSText.Font = Enum.Font.GothamBold
+FPSText.TextXAlignment = Enum.TextXAlignment.Center
+FPSText.TextYAlignment = Enum.TextYAlignment.Center
+FPSText.TextStrokeTransparency = 0.5
+FPSText.ZIndex = 2
+FPSText.Parent = FPSFrame
+
+do
+    local dragging = false
+    local dragStart = Vector2.new()
+    local startPos = FPSFrame.Position
+
+    FPSFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = FPSFrame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            FPSFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local FPSCounter = 0
+local LastFPSUpdate = tick()
+
+local Connections = {}
+local function AddConnection(c) table.insert(Connections, c) end
+
+-- =====================================================
+-- INVISIBILITY
+-- =====================================================
+
+local OriginalCharacterParts = {}
+
+local function EnableInvisibility()
+    local character = LocalPlayer.Character
+    if not character then return end
+    for _, part in pairs(character:GetDescendants()) do
+        if part:IsA("BasePart") or part:IsA("Decal") or part:IsA("Texture") then
+            if not OriginalCharacterParts[part] then
+                OriginalCharacterParts[part] = part.Transparency or 0
+            end
+            part.Transparency = 1
+        end
+    end
+end
+
+local function DisableInvisibility()
+    local character = LocalPlayer.Character
+    if not character then return end
+    for part, transparency in pairs(OriginalCharacterParts) do
+        pcall(function() part.Transparency = transparency end)
+    end
+    OriginalCharacterParts = {}
+end
+
+-- =====================================================
+-- MOVEMENT
+-- =====================================================
+
+local FlyBodyVelocity = nil
+local FlyBodyGyro = nil
+local NoclipConnection = nil
+
+local function UpdateSpeed()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local h = char:FindFirstChild("Humanoid")
+    if not h then return end
+    if MovementConfig.Speed then
+        local target = MovementConfig.SpeedValue
+        local current = MovementConfig.SpeedCurrent or h.WalkSpeed
+        local step = math.min(2, math.abs(target - current))
+        current = current < target and current + step or target
+        MovementConfig.SpeedCurrent = current
+        h.WalkSpeed = current
+    else
+        MovementConfig.SpeedCurrent = 16
+        h.WalkSpeed = 16
+    end
+    h.JumpPower = MovementConfig.Jump and MovementConfig.JumpValue or 50
+end
+
+local function EnableFly()
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        if FlyBodyVelocity then FlyBodyVelocity:Destroy() FlyBodyVelocity = nil end
+        if FlyBodyGyro then FlyBodyGyro:Destroy() FlyBodyGyro = nil end
+        FlyBodyVelocity = Instance.new("BodyVelocity")
+        FlyBodyVelocity.Velocity = Vector3.new(0,0,0)
+        FlyBodyVelocity.MaxForce = Vector3.new(1e5,1e5,1e5)
+        FlyBodyVelocity.P = 1e4
+        FlyBodyVelocity.Parent = root
+        FlyBodyGyro = Instance.new("BodyGyro")
+        FlyBodyGyro.MaxTorque = Vector3.new(1e5,1e5,1e5)
+        FlyBodyGyro.P = 1e4 FlyBodyGyro.D = 500
+        FlyBodyGyro.CFrame = root.CFrame
+        FlyBodyGyro.Parent = root
+    end)
+end
+
+local function DisableFly()
+    pcall(function()
+        if FlyBodyVelocity then FlyBodyVelocity:Destroy() FlyBodyVelocity = nil end
+        if FlyBodyGyro then FlyBodyGyro:Destroy() FlyBodyGyro = nil end
+    end)
+end
+
+local function UpdateFly()
+    pcall(function()
+        if not MovementConfig.Fly or not FlyBodyVelocity or not FlyBodyGyro then return end
+        local cam = Camera.CFrame
+        local dir = Vector3.new(0,0,0)
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0,1,0) end
+        local target = dir.Magnitude > 0 and dir.Unit * MovementConfig.FlySpeed or Vector3.new(0,0,0)
+        FlyBodyVelocity.Velocity = FlyBodyVelocity.Velocity:Lerp(target, 0.2)
+        FlyBodyGyro.CFrame = cam
+    end)
+end
+
+local function EnableNoclip()
+    if NoclipConnection then return end
+    NoclipConnection = RunService.Stepped:Connect(function()
+        if MovementConfig.Noclip then
+            local char = LocalPlayer.Character
+            if char then
+                for _, p in pairs(char:GetDescendants()) do
+                    if p:IsA("BasePart") then p.CanCollide = false end
+                end
+            end
+        end
+    end)
+end
+
+local function DisableNoclip()
+    if NoclipConnection then NoclipConnection:Disconnect() NoclipConnection = nil end
+    local char = LocalPlayer.Character
+    if char then
+        for _, p in pairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then p.CanCollide = true end
+        end
+    end
+end
+
+-- =====================================================
+-- DETECTION DES OEUFS
+-- =====================================================
+
+local RARITY_PRIORITY = {
+    secret = 1, exclusive = 1, divine = 1, celestial = 1, infinity = 1,
+    mythical = 2, mythic = 2, godly = 2, ancient = 2, omega = 2, void = 2, cosmic = 2, rainbow = 2,
+    legendary = 3, limited = 3, exotic = 3, unique = 3, golden = 3, chroma = 3,
+    epic = 4, special = 4, super = 4, premium = 4, shiny = 4,
+    rare = 5, ultra = 5,
+    uncommon = 6,
+    common = 7,
+}
+local UNKNOWN_PRIORITY = 999
+
+local ModuleRarityMap = {}
+local ChatLearnedRarityMap = {}
+
+-- Nom valide : contient "egg" (pas forcement a la fin) -- version plus permissive
+local function IsValidEggName(name)
+    if not name or typeof(name) ~= "string" then return false end
+    local lower = name:lower()
+    return lower:find("egg") ~= nil
+end
+
+local function GetEggRarityFromInstance(eggInstance)
+    local rarity = nil
+    pcall(function()
+        local attrs = eggInstance:GetAttributes()
+        for k, v in pairs(attrs) do
+            if tostring(k):lower():find("rar") then rarity = tostring(v) end
+        end
+    end)
+    if not rarity then
+        pcall(function()
+            for _, sub in pairs(eggInstance:GetChildren()) do
+                if (sub:IsA("StringValue") or sub:IsA("IntValue") or sub:IsA("NumberValue")) and sub.Name:lower():find("rar") then
+                    rarity = tostring(sub.Value)
+                end
+            end
+        end)
+    end
+    return rarity
+end
+
+local function GetEggPriority(eggInstance, nameLower)
+    local rarity = GetEggRarityFromInstance(eggInstance)
+    if rarity then
+        local rLower = rarity:lower()
+        if RARITY_PRIORITY[rLower] then
+            return RARITY_PRIORITY[rLower], rarity
+        end
+        return UNKNOWN_PRIORITY, rarity
+    end
+
+    local moduleData = ModuleRarityMap[nameLower]
+    if moduleData then
+        return moduleData.priority, moduleData.rarity
+    end
+
+    local chatData = ChatLearnedRarityMap[nameLower]
+    if chatData then
+        return chatData.priority, chatData.rarity
+    end
+
+    return UNKNOWN_PRIORITY, "Unknown"
+end
+
+local function IsEggOwnedByOtherPlayer(eggInstance)
+    local current = eggInstance
+    for i = 1, 10 do
+        if not current or current == Workspace then break end
+        local isOwnedByOther = false
+        pcall(function()
+            local ownerAttr = current:GetAttribute("Owner")
+            if typeof(ownerAttr) == "Instance" and ownerAttr:IsA("Player") and ownerAttr ~= LocalPlayer then
+                isOwnedByOther = true
+            elseif typeof(ownerAttr) == "string" and ownerAttr ~= "" and ownerAttr ~= LocalPlayer.Name then
+                isOwnedByOther = true
+            end
+
+            local ownerId = current:GetAttribute("OwnerUserId") or current:GetAttribute("UserId") or current:GetAttribute("OwnerId")
+            if ownerId and tonumber(ownerId) and tonumber(ownerId) ~= LocalPlayer.UserId then
+                isOwnedByOther = true
+            end
+
+            local ownerChild = current:FindFirstChild("Owner")
+            if ownerChild then
+                if ownerChild:IsA("ObjectValue") and ownerChild.Value and ownerChild.Value:IsA("Player") and ownerChild.Value ~= LocalPlayer then
+                    isOwnedByOther = true
+                elseif ownerChild:IsA("StringValue") and ownerChild.Value ~= "" and ownerChild.Value ~= LocalPlayer.Name then
+                    isOwnedByOther = true
+                end
+            end
+
+            for _, p in pairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and current.Name == p.Name then
+                    isOwnedByOther = true
+                end
+            end
+        end)
+        if isOwnedByOther then return true end
+        current = current.Parent
+    end
+    return false
+end
+
+local function GetEggPosition(eggInstance)
+    local ok, pos = pcall(function()
+        if eggInstance:IsA("BasePart") then return eggInstance.Position end
+        if eggInstance:IsA("Model") then
+            if eggInstance.PrimaryPart then return eggInstance.PrimaryPart.Position end
+            local part = eggInstance:FindFirstChildWhichIsA("BasePart", true)
+            if part then return part.Position end
+        end
+        return nil
+    end)
+    if ok then return pos end
+    return nil
+end
+
+local function IsInOwnBaseZone(pos)
+    if not AutoFarmConfig.BaseCFrame or not pos then return false end
+    if AutoFarmConfig.ExclusionRadius <= 0 then return false end
+    return (pos - AutoFarmConfig.BaseCFrame.Position).Magnitude <= AutoFarmConfig.ExclusionRadius
+end
+
+local function ScanWorkspaceEggs()
+    local found = {}
+    local function scan(obj, depth)
+        if depth > 14 then return end
+        for _, child in pairs(obj:GetChildren()) do
+            pcall(function()
+                if (child:IsA("Model") or child:IsA("BasePart") or child:IsA("Folder")) and IsValidEggName(child.Name) then
+                    if not IsEggOwnedByOtherPlayer(child) then
+                        local pos = GetEggPosition(child)
+                        if not IsInOwnBaseZone(pos) then
+                            local nameLower = child.Name:lower()
+                            local priority, rarity = GetEggPriority(child, nameLower)
+                            table.insert(found, {instance = child, name = child.Name, rarity = rarity, priority = priority})
+                        end
+                    end
+                end
+            end)
+            scan(child, depth + 1)
+        end
+    end
+    scan(Workspace, 0)
+    table.sort(found, function(a, b) return a.priority < b.priority end)
+    return found
+end
+
+-- =====================================================
+-- DECOUVERTE AUTOMATIQUE DES RARETES (ModuleScripts)
+-- =====================================================
+
+local DiscoveredEggRarity = {}
+local RarityDiscoveryStats = { ModulesScanned = 0, EggsFound = 0, ModuleNamesScanned = {} }
+
+local function SafeRequire(moduleScript)
+    local ok, result = pcall(function() return require(moduleScript) end)
+    if ok then return result end
+    return nil
+end
+
+local function ScanTableForEggData(tbl, depth)
+    if depth > 5 or typeof(tbl) ~= "table" then return end
+    for key, value in pairs(tbl) do
+        if typeof(value) == "table" then
+            local rarity = value.Rarity or value.rarity or value.Tier or value.tier
+            local chance = value.Chance or value.chance or value.Weight or value.weight
+                or value.Odds or value.odds or value.Probability or value.probability
+            local nameGuess = value.Name or value.name or (typeof(key) == "string" and key) or nil
+
+            if rarity and typeof(rarity) == "string" and nameGuess and typeof(nameGuess) == "string" then
+                local key2 = nameGuess:lower()
+                if key2:find("egg") then
+                    DiscoveredEggRarity[key2] = DiscoveredEggRarity[key2] or {}
+                    DiscoveredEggRarity[key2].rarity = rarity
+                    if typeof(chance) == "number" then
+                        DiscoveredEggRarity[key2].chance = chance
+                    end
+                end
+            end
+
+            pcall(function() ScanTableForEggData(value, depth + 1) end)
+        elseif typeof(value) == "string" and typeof(key) == "string" then
+            local keyLower = key:lower()
+            if keyLower:find("egg") and RARITY_PRIORITY[value:lower()] then
+                DiscoveredEggRarity[keyLower] = DiscoveredEggRarity[keyLower] or {}
+                DiscoveredEggRarity[keyLower].rarity = value
+            end
+        end
+    end
+end
+
+local function FinalizeDiscoveredRarities()
+    local withChance = {}
+    for name, data in pairs(DiscoveredEggRarity) do
+        if data.chance then table.insert(withChance, {name = name, chance = data.chance}) end
+    end
+    table.sort(withChance, function(a, b) return a.chance < b.chance end)
+    for i, entry in ipairs(withChance) do
+        ModuleRarityMap[entry.name] = {
+            rarity = DiscoveredEggRarity[entry.name].rarity,
+            priority = i,
+        }
+    end
+
+    for name, data in pairs(DiscoveredEggRarity) do
+        if not ModuleRarityMap[name] and data.rarity then
+            local rLower = data.rarity:lower()
+            local p = RARITY_PRIORITY[rLower] or UNKNOWN_PRIORITY
+            ModuleRarityMap[name] = { rarity = data.rarity, priority = p }
+        end
+    end
+
+    local count = 0
+    for _ in pairs(ModuleRarityMap) do count = count + 1 end
+    RarityDiscoveryStats.EggsFound = count
+end
+
+local function DiscoverGameEggRarities()
+    RarityDiscoveryStats.ModulesScanned = 0
+    RarityDiscoveryStats.ModuleNamesScanned = {}
+    pcall(function()
+        local locations = {ReplicatedStorage, ReplicatedFirst}
+        local moduleKeywords = {"egg","pet","rarity","rarities","data","config","item","shop"}
+        for _, loc in pairs(locations) do
+            pcall(function()
+                for _, desc in pairs(loc:GetDescendants()) do
+                    if desc:IsA("ModuleScript") then
+                        local nameLower = desc.Name:lower()
+                        local matches = false
+                        for _, kw in pairs(moduleKeywords) do
+                            if nameLower:find(kw) then matches = true break end
+                        end
+                        if matches then
+                            RarityDiscoveryStats.ModulesScanned = RarityDiscoveryStats.ModulesScanned + 1
+                            table.insert(RarityDiscoveryStats.ModuleNamesScanned, desc:GetFullName())
+                            local result = SafeRequire(desc)
+                            if result then
+                                pcall(function() ScanTableForEggData(result, 0) end)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+    FinalizeDiscoveredRarities()
+end
+
+task.spawn(function()
+    local delays = {1, 3, 6, 12, 20}
+    for _, d in pairs(delays) do
+        task.wait(d)
+        pcall(DiscoverGameEggRarities)
+    end
+end)
+
+-- =====================================================
+-- DETECTION VIA LOGS / CHAT
+-- =====================================================
+
+local function HandleEggLogMessage(message)
+    if typeof(message) ~= "string" then return end
+    local lowerMsg = message:lower()
+
+    for eggNameToken in message:gmatch("%f[%w_]+[%w_]*[Ee]gg[%w_]*") do
+        if IsValidEggName(eggNameToken) then
+            local key = eggNameToken:lower()
+
+            if not ModuleRarityMap[key] then
+                local foundRarityWord = nil
+                local foundPriority = UNKNOWN_PRIORITY
+                for rarityWord, priority in pairs(RARITY_PRIORITY) do
+                    if lowerMsg:find(rarityWord, 1, true) and priority < foundPriority then
+                        foundRarityWord = rarityWord
+                        foundPriority = priority
+                    end
+                end
+
+                ChatLearnedRarityMap[key] = {
+                    rarity = foundRarityWord or "Unknown",
+                    priority = foundPriority,
+                }
+
+                pcall(function()
+                    if UpdateEggWindowEntryRarity then
+                        UpdateEggWindowEntryRarity(key, foundRarityWord or "Unknown", foundPriority)
+                    end
+                end)
+            end
+        end
+    end
+end
+
+AddConnection(LogService.MessageOut:Connect(function(message, msgType)
+    pcall(HandleEggLogMessage, message)
+end))
+
+local ProcessedChatInstances = setmetatable({}, {__mode = "k"})
+
+local function HandleChatText(text)
+    if not text or text == "" then return end
+    pcall(HandleEggLogMessage, text)
+end
+
+pcall(function()
+    local TextChatService = game:GetService("TextChatService")
+    local channelsFolder = TextChatService:WaitForChild("TextChannels", 5)
+    if channelsFolder then
+        local function hookChannel(channel)
+            if channel:IsA("TextChannel") then
+                AddConnection(channel.MessageReceived:Connect(function(message)
+                    pcall(function() HandleChatText(message.Text) end)
+                end))
+            end
+        end
+        for _, channel in pairs(channelsFolder:GetChildren()) do hookChannel(channel) end
+        AddConnection(channelsFolder.ChildAdded:Connect(hookChannel))
+    end
+end)
+
+pcall(function()
+    local function hookPlayer(player)
+        pcall(function()
+            AddConnection(player.Chatted:Connect(function(msg) HandleChatText(msg) end))
+        end)
+    end
+    for _, p in pairs(Players:GetPlayers()) do hookPlayer(p) end
+    AddConnection(Players.PlayerAdded:Connect(hookPlayer))
+end)
+
+pcall(function()
+    task.spawn(function()
+        local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+        local chatGui = playerGui:FindFirstChild("Chat") or playerGui:WaitForChild("Chat", 10)
+        if not chatGui then return end
+        local function onNewInstance(inst)
+            pcall(function()
+                if (inst:IsA("TextLabel") or inst:IsA("TextButton")) and not ProcessedChatInstances[inst] then
+                    ProcessedChatInstances[inst] = true
+                    task.spawn(function()
+                        task.wait(0.1)
+                        pcall(function()
+                            if inst.Text and inst.Text ~= "" then HandleChatText(inst.Text) end
+                        end)
+                    end)
+                end
+            end)
+        end
+        for _, d in pairs(chatGui:GetDescendants()) do onNewInstance(d) end
+        AddConnection(chatGui.DescendantAdded:Connect(onNewInstance))
+    end)
+end)
+
+-- =====================================================
+-- DETECTION ALTERNATIVE : COLLECTIONSERVICE & REMOTEEVENTS
+-- =====================================================
+
+local function ProcessPotentialEggInstance(inst)
+    if not inst or not inst.Parent then return end
+    if not (inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Folder")) then return end
+    if not IsValidEggName(inst.Name) then return end
+    if IsEggOwnedByOtherPlayer(inst) then return end
+    local pos = GetEggPosition(inst)
+    if IsInOwnBaseZone(pos) then return end
+    local nameLower = inst.Name:lower()
+    local priority, rarity = GetEggPriority(inst, nameLower)
+    if AddEggWindowEntry then
+        AddEggWindowEntry({instance = inst, name = inst.Name, rarity = rarity, priority = priority})
+    end
+end
+
+local EGG_TAGS = {"Egg", "Eggs", "SpawnEgg", "EggSpawn", "RareEgg", "EggItem"}
+
+local function HookCollectionServiceEggs()
+    for _, tag in pairs(EGG_TAGS) do
+        pcall(function()
+            for _, inst in pairs(CollectionService:GetTagged(tag)) do
+                ProcessPotentialEggInstance(inst)
+            end
+            AddConnection(CollectionService:GetInstanceAddedSignal(tag):Connect(function(inst)
+                task.wait(0.15)
+                pcall(function() ProcessPotentialEggInstance(inst) end)
+            end))
+        end)
+    end
+end
+HookCollectionServiceEggs()
+
+local HookedRemotes = setmetatable({}, {__mode = "k"})
+
+local EGG_REMOTE_KEYWORDS = {
+    "egg","spawn","hatch","rarity","rare","notif","announce","alert","broadcast","event","update"
+}
+
+local function ShouldHookRemote(remote)
+    local nameLower = remote.Name:lower()
+    for _, kw in pairs(EGG_REMOTE_KEYWORDS) do
+        if nameLower:find(kw) then return true end
+    end
+    return false
+end
+
+local function ScanArgsForEggs(...)
+    local args = {...}
+    for _, arg in pairs(args) do
+        pcall(function()
+            if typeof(arg) == "Instance" then
+                ProcessPotentialEggInstance(arg)
+                if arg:IsA("Folder") or arg:IsA("Model") then
+                    for _, d in pairs(arg:GetDescendants()) do
+                        ProcessPotentialEggInstance(d)
+                    end
+                end
+            elseif typeof(arg) == "string" then
+                HandleEggLogMessage(arg)
+            elseif typeof(arg) == "table" then
+                for k, v in pairs(arg) do
+                    if typeof(v) == "Instance" then
+                        ProcessPotentialEggInstance(v)
+                    elseif typeof(v) == "string" then
+                        HandleEggLogMessage(v)
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function HookRemoteForEggs(remote)
+    if HookedRemotes[remote] then return end
+    if not remote:IsA("RemoteEvent") then return end
+    HookedRemotes[remote] = true
+    pcall(function()
+        AddConnection(remote.OnClientEvent:Connect(function(...)
+            pcall(ScanArgsForEggs, ...)
+        end))
+    end)
+end
+
+local function HookAllRemotesForEggs()
+    local function scan(obj)
+        for _, child in pairs(obj:GetChildren()) do
+            if child:IsA("RemoteEvent") and ShouldHookRemote(child) then
+                HookRemoteForEggs(child)
+            end
+            scan(child)
+        end
+    end
+    scan(game)
+end
+HookAllRemotesForEggs()
+
+AddConnection(game.DescendantAdded:Connect(function(inst)
+    pcall(function()
+        if inst:IsA("RemoteEvent") and ShouldHookRemote(inst) then
+            HookRemoteForEggs(inst)
+        end
+    end)
+end))
+
+-- =====================================================
+-- FENETRE : OEUFS DISPONIBLES
+-- =====================================================
+
+local BETTER_THRESHOLD = 4
+
+local ACCENT_COLOR = Color3.fromRGB(70, 110, 150)
+
+local EggWindowGui = Instance.new("ScreenGui")
+EggWindowGui.Name = "EggWindowGui"
+EggWindowGui.ResetOnSpawn = false
+EggWindowGui.IgnoreGuiInset = true
+EggWindowGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+EggWindowGui.Enabled = false
+pcall(function() EggWindowGui.Parent = CoreGuiService end)
+if not EggWindowGui.Parent then EggWindowGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local EggWindowFrame = Instance.new("Frame")
+EggWindowFrame.Name = "EggWindowFrame"
+EggWindowFrame.Size = UDim2.new(0, 280, 0, 340)
+EggWindowFrame.Position = UDim2.new(0, 200, 0, 100)
+EggWindowFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 27)
+EggWindowFrame.BorderSizePixel = 0
+EggWindowFrame.Active = true
+EggWindowFrame.Parent = EggWindowGui
+
+local EggWindowCorner = Instance.new("UICorner")
+EggWindowCorner.CornerRadius = UDim.new(0, 10)
+EggWindowCorner.Parent = EggWindowFrame
+
+local EggWindowStroke = Instance.new("UIStroke")
+EggWindowStroke.Color = Color3.fromRGB(55, 55, 60)
+EggWindowStroke.Thickness = 1
+EggWindowStroke.Transparency = 0.2
+EggWindowStroke.Parent = EggWindowFrame
+
+local EggWindowTitleBar = Instance.new("Frame")
+EggWindowTitleBar.Name = "TitleBar"
+EggWindowTitleBar.Size = UDim2.new(1, 0, 0, 34)
+EggWindowTitleBar.BackgroundColor3 = Color3.fromRGB(32, 32, 36)
+EggWindowTitleBar.BorderSizePixel = 0
+EggWindowTitleBar.Parent = EggWindowFrame
+
+local EggWindowTitleCorner = Instance.new("UICorner")
+EggWindowTitleCorner.CornerRadius = UDim.new(0, 10)
+EggWindowTitleCorner.Parent = EggWindowTitleBar
+
+local EggWindowTitleFix = Instance.new("Frame")
+EggWindowTitleFix.Size = UDim2.new(1, 0, 0, 10)
+EggWindowTitleFix.Position = UDim2.new(0, 0, 1, -10)
+EggWindowTitleFix.BackgroundColor3 = Color3.fromRGB(32, 32, 36)
+EggWindowTitleFix.BorderSizePixel = 0
+EggWindowTitleFix.Parent = EggWindowTitleBar
+
+local EggWindowTitleText = Instance.new("TextLabel")
+EggWindowTitleText.Size = UDim2.new(1, -16, 1, 0)
+EggWindowTitleText.Position = UDim2.new(0, 12, 0, 0)
+EggWindowTitleText.BackgroundTransparency = 1
+EggWindowTitleText.Text = "Oeufs disponibles"
+EggWindowTitleText.TextColor3 = Color3.fromRGB(240, 240, 245)
+EggWindowTitleText.Font = Enum.Font.GothamBold
+EggWindowTitleText.TextSize = 14
+EggWindowTitleText.TextXAlignment = Enum.TextXAlignment.Left
+EggWindowTitleText.Parent = EggWindowTitleBar
+
+local EggWindowControlBar = Instance.new("Frame")
+EggWindowControlBar.Name = "ControlBar"
+EggWindowControlBar.Size = UDim2.new(1, -16, 0, 28)
+EggWindowControlBar.Position = UDim2.new(0, 8, 0, 40)
+EggWindowControlBar.BackgroundTransparency = 1
+EggWindowControlBar.Parent = EggWindowFrame
+
+local EggWindowControlLayout = Instance.new("UIListLayout")
+EggWindowControlLayout.FillDirection = Enum.FillDirection.Horizontal
+EggWindowControlLayout.Padding = UDim.new(0, 6)
+EggWindowControlLayout.SortOrder = Enum.SortOrder.LayoutOrder
+EggWindowControlLayout.Parent = EggWindowControlBar
+
+local RefreshEggButton = Instance.new("TextButton")
+RefreshEggButton.Name = "RefreshButton"
+RefreshEggButton.Size = UDim2.new(0.5, -3, 1, 0)
+RefreshEggButton.BackgroundColor3 = Color3.fromRGB(42, 42, 46)
+RefreshEggButton.BorderSizePixel = 0
+RefreshEggButton.Text = "Refresh"
+RefreshEggButton.TextColor3 = Color3.fromRGB(230, 230, 235)
+RefreshEggButton.Font = Enum.Font.GothamSemibold
+RefreshEggButton.TextSize = 12
+RefreshEggButton.AutoButtonColor = true
+RefreshEggButton.Parent = EggWindowControlBar
+
+local RefreshEggCorner = Instance.new("UICorner")
+RefreshEggCorner.CornerRadius = UDim.new(0, 6)
+RefreshEggCorner.Parent = RefreshEggButton
+
+local BetterEggButton = Instance.new("TextButton")
+BetterEggButton.Name = "BetterButton"
+BetterEggButton.Size = UDim2.new(0.5, -3, 1, 0)
+BetterEggButton.BackgroundColor3 = Color3.fromRGB(42, 42, 46)
+BetterEggButton.BorderSizePixel = 0
+BetterEggButton.Text = "Rares uniquement: OFF"
+BetterEggButton.TextColor3 = Color3.fromRGB(230, 230, 235)
+BetterEggButton.Font = Enum.Font.GothamSemibold
+BetterEggButton.TextSize = 12
+BetterEggButton.AutoButtonColor = true
+BetterEggButton.Parent = EggWindowControlBar
+
+local BetterEggCorner = Instance.new("UICorner")
+BetterEggCorner.CornerRadius = UDim.new(0, 6)
+BetterEggCorner.Parent = BetterEggButton
+
+local EggScrollFrame = Instance.new("ScrollingFrame")
+EggScrollFrame.Name = "EggList"
+EggScrollFrame.Size = UDim2.new(1, -16, 1, -78)
+EggScrollFrame.Position = UDim2.new(0, 8, 0, 72)
+EggScrollFrame.BackgroundTransparency = 1
+EggScrollFrame.BorderSizePixel = 0
+EggScrollFrame.ScrollBarThickness = 3
+EggScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 90)
+EggScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+EggScrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+EggScrollFrame.Parent = EggWindowFrame
+
+local EggListLayout = Instance.new("UIListLayout")
+EggListLayout.Padding = UDim.new(0, 5)
+EggListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+EggListLayout.Parent = EggScrollFrame
+
+do
+    local dragging = false
+    local dragStart = Vector2.new()
+    local startPos = EggWindowFrame.Position
+
+    EggWindowTitleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = EggWindowFrame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            EggWindowFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local function ReflowEggWindow()
+    for index, entry in ipairs(EggWindowState.EntriesOrder) do
+        if entry.button then entry.button.LayoutOrder = index end
+    end
+end
+
+local function RemoveEggWindowEntry(instance)
+    local btn = EggWindowState.DisplayedEggs[instance]
+    if btn then
+        pcall(function() btn:Destroy() end)
+        EggWindowState.DisplayedEggs[instance] = nil
+    end
+    for i, e in ipairs(EggWindowState.EntriesOrder) do
+        if e.instance == instance then
+            table.remove(EggWindowState.EntriesOrder, i)
+            break
+        end
+    end
+    ReflowEggWindow()
+end
+
+local function PruneEggWindowEntries()
+    local toRemove = {}
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        if not entry.instance or not entry.instance.Parent then
+            table.insert(toRemove, entry.instance)
+        end
+    end
+    for _, inst in ipairs(toRemove) do
+        RemoveEggWindowEntry(inst)
+    end
+end
+
+AddEggWindowEntry = function(eggData)
+    if not eggData.instance or not eggData.instance.Parent then return end
+    if EggWindowState.DisplayedEggs[eggData.instance] then return end
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 40)
+    btn.BackgroundColor3 = Color3.fromRGB(34, 34, 38)
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = EggScrollFrame
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 7)
+    btnCorner.Parent = btn
+
+    local btnStroke = Instance.new("UIStroke")
+    btnStroke.Color = Color3.fromRGB(50, 50, 55)
+    btnStroke.Thickness = 1
+    btnStroke.Transparency = 0.5
+    btnStroke.Parent = btn
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -14, 0, 20)
+    nameLabel.Position = UDim2.new(0, 10, 0, 3)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = eggData.name
+    nameLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
+    nameLabel.Font = Enum.Font.GothamSemibold
+    nameLabel.TextSize = 13
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.Parent = btn
+
+    local rarityLabel = Instance.new("TextLabel")
+    rarityLabel.Name = "RarityLabel"
+    rarityLabel.Size = UDim2.new(1, -14, 0, 14)
+    rarityLabel.Position = UDim2.new(0, 10, 0, 21)
+    rarityLabel.BackgroundTransparency = 1
+    rarityLabel.Text = eggData.rarity or "Unknown"
+    rarityLabel.TextColor3 = Color3.fromRGB(150, 150, 158)
+    rarityLabel.Font = Enum.Font.Gotham
+    rarityLabel.TextSize = 11
+    rarityLabel.TextXAlignment = Enum.TextXAlignment.Left
+    rarityLabel.Parent = btn
+
+    btn.MouseEnter:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(42, 42, 48) end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(34, 34, 38) end)
+
+    local entry = {
+        instance = eggData.instance,
+        button = btn,
+        priority = eggData.priority or UNKNOWN_PRIORITY,
+        name = eggData.name,
+    }
+
+    local insertIndex = #EggWindowState.EntriesOrder + 1
+    for i, e in ipairs(EggWindowState.EntriesOrder) do
+        if entry.priority < e.priority then
+            insertIndex = i
+            break
+        end
+    end
+    table.insert(EggWindowState.EntriesOrder, insertIndex, entry)
+    EggWindowState.DisplayedEggs[eggData.instance] = btn
+
+    ReflowEggWindow()
+
+    btn.Visible = (not EggWindowState.BetterFilterEnabled) or (entry.priority <= BETTER_THRESHOLD)
+
+    btn.MouseButton1Click:Connect(function()
+        local pos = GetEggPosition(eggData.instance)
+        if pos and not IsInOwnBaseZone(pos) then
+            SafeTeleport(CFrame.new(pos + Vector3.new(0, 3, 0)))
+            Rayfield:Notify({Title="Teleportation", Content="Teleporte sur " .. eggData.name, Duration=2, Image=4483362458})
+        elseif pos and IsInOwnBaseZone(pos) then
+            Rayfield:Notify({Title="Zone exclue", Content="Cet oeuf est dans la zone de votre base", Duration=2, Image=4483362458})
+            RemoveEggWindowEntry(eggData.instance)
+        else
+            Rayfield:Notify({Title="Erreur", Content="Oeuf introuvable", Duration=2, Image=4483362458})
+            RemoveEggWindowEntry(eggData.instance)
+        end
+    end)
+end
+
+UpdateEggWindowEntryRarity = function(nameLower, rarity, priority)
+    local changed = false
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        if entry.name:lower() == nameLower and entry.priority ~= priority then
+            entry.priority = priority
+            changed = true
+            local btn = entry.button
+            if btn then
+                local rarityLabel = btn:FindFirstChild("RarityLabel")
+                if rarityLabel then rarityLabel.Text = rarity end
+            end
+        end
+    end
+    if changed then
+        table.sort(EggWindowState.EntriesOrder, function(a, b) return a.priority < b.priority end)
+        ReflowEggWindow()
+        for _, entry in ipairs(EggWindowState.EntriesOrder) do
+            if entry.button then
+                entry.button.Visible = (not EggWindowState.BetterFilterEnabled) or (entry.priority <= BETTER_THRESHOLD)
+            end
+        end
+    end
+end
+
+local function PopulateEggWindowFromScan()
+    PruneEggWindowEntries()
+    local eggs = ScanWorkspaceEggs()
+    for _, egg in pairs(eggs) do
+        AddEggWindowEntry(egg)
+    end
+    for _, tag in pairs(EGG_TAGS) do
+        pcall(function()
+            for _, inst in pairs(CollectionService:GetTagged(tag)) do
+                ProcessPotentialEggInstance(inst)
+            end
+        end)
+    end
+end
+
+local function RefreshAllEntryPriorities()
+    local changed = false
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        if entry.instance and entry.instance.Parent then
+            local nameLower = entry.name:lower()
+            local priority, rarity = GetEggPriority(entry.instance, nameLower)
+            if priority ~= entry.priority then
+                entry.priority = priority
+                changed = true
+                local btn = entry.button
+                if btn then
+                    local rarityLabel = btn:FindFirstChild("RarityLabel")
+                    if rarityLabel then rarityLabel.Text = rarity end
+                end
+            end
+        end
+    end
+    if changed then
+        table.sort(EggWindowState.EntriesOrder, function(a, b) return a.priority < b.priority end)
+        ReflowEggWindow()
+        for _, entry in ipairs(EggWindowState.EntriesOrder) do
+            if entry.button then
+                entry.button.Visible = (not EggWindowState.BetterFilterEnabled) or (entry.priority <= BETTER_THRESHOLD)
+            end
+        end
+    end
+end
+
+local function RefreshEggWindowForZoneChange()
+    local toRemove = {}
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        local pos = GetEggPosition(entry.instance)
+        if IsInOwnBaseZone(pos) then
+            table.insert(toRemove, entry.instance)
+        end
+    end
+    for _, inst in ipairs(toRemove) do RemoveEggWindowEntry(inst) end
+    PopulateEggWindowFromScan()
+end
+
+RefreshEggButton.MouseButton1Click:Connect(function()
+    PopulateEggWindowFromScan()
+    RefreshAllEntryPriorities()
+    Rayfield:Notify({Title="Oeufs", Content="Liste actualisee", Duration=2, Image=4483362458})
+end)
+
+BetterEggButton.MouseButton1Click:Connect(function()
+    EggWindowState.BetterFilterEnabled = not EggWindowState.BetterFilterEnabled
+    if EggWindowState.BetterFilterEnabled then
+        BetterEggButton.Text = "Rares uniquement: ON"
+        BetterEggButton.BackgroundColor3 = ACCENT_COLOR
+    else
+        BetterEggButton.Text = "Rares uniquement: OFF"
+        BetterEggButton.BackgroundColor3 = Color3.fromRGB(42, 42, 46)
+    end
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        if entry.button then
+            entry.button.Visible = (not EggWindowState.BetterFilterEnabled) or (entry.priority <= BETTER_THRESHOLD)
+        end
+    end
+end)
+
+AddConnection(Workspace.DescendantAdded:Connect(function(inst)
+    task.spawn(function()
+        task.wait(0.3)
+        pcall(function() ProcessPotentialEggInstance(inst) end)
+    end)
+end))
+
+AddConnection(Workspace.DescendantRemoving:Connect(function(inst)
+    RemoveEggWindowEntry(inst)
+end))
+
+-- =====================================================
+-- OUTIL DE DEBUG (pour diagnostiquer les problemes de detection)
+-- =====================================================
+
+local function GetInstanceFullPath(inst)
+    local ok, path = pcall(function() return inst:GetFullName() end)
+    if ok then return path end
+    return inst.Name
+end
+
+local function GenerateDebugReport()
+    local lines = {}
+    table.insert(lines, "===== RAPPORT DEBUG OEUFS =====")
+    table.insert(lines, "PlaceId: "..tostring(game.PlaceId))
+    table.insert(lines, "")
+
+    table.insert(lines, "--- Instances contenant 'egg' dans Workspace ---")
+    local foundAny = false
+    pcall(function()
+        for _, inst in pairs(Workspace:GetDescendants()) do
+            if inst.Name:lower():find("egg") then
+                foundAny = true
+                local validName = IsValidEggName(inst.Name)
+                local ownedOther = false
+                local pos = nil
+                local inBase = false
+                local priority, rarity = "N/A", "N/A"
+                pcall(function() ownedOther = IsEggOwnedByOtherPlayer(inst) end)
+                pcall(function() pos = GetEggPosition(inst) end)
+                pcall(function() inBase = IsInOwnBaseZone(pos) end)
+                if validName then
+                    pcall(function() priority, rarity = GetEggPriority(inst, inst.Name:lower()) end)
+                end
+                table.insert(lines, string.format(
+                    "Nom='%s' Class=%s ValidName=%s OwnedByOther=%s DansZoneBase=%s Priority=%s Rarity=%s Path=%s",
+                    inst.Name, inst.ClassName, tostring(validName), tostring(ownedOther), tostring(inBase), tostring(priority), tostring(rarity), GetInstanceFullPath(inst)
+                ))
+            end
+        end
+    end)
+    if not foundAny then table.insert(lines, "(Aucune instance contenant 'egg' trouvee)") end
+
+    table.insert(lines, "")
+    table.insert(lines, "--- ModuleScripts scannes ---")
+    table.insert(lines, "Nombre scanne: "..tostring(RarityDiscoveryStats.ModulesScanned))
+    table.insert(lines, "Oeufs avec rarete identifiee: "..tostring(RarityDiscoveryStats.EggsFound))
+    for _, n in pairs(RarityDiscoveryStats.ModuleNamesScanned) do
+        table.insert(lines, "  Module: "..n)
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "--- Raretes trouvees via modules du jeu ---")
+    for name, data in pairs(ModuleRarityMap) do
+        table.insert(lines, string.format("  %s -> rarity=%s priority=%s", name, tostring(data.rarity), tostring(data.priority)))
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "--- Raretes apprises via chat/logs ---")
+    for name, data in pairs(ChatLearnedRarityMap) do
+        table.insert(lines, string.format("  %s -> rarity=%s priority=%s", name, tostring(data.rarity), tostring(data.priority)))
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "--- Entrees actuellement dans la fenetre TP ---")
+    for _, entry in ipairs(EggWindowState.EntriesOrder) do
+        table.insert(lines, string.format("  %s priority=%s visible=%s", entry.name, tostring(entry.priority), tostring(entry.button and entry.button.Visible)))
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "--- Base / Exclusion ---")
+    table.insert(lines, "Base definie: "..tostring(AutoFarmConfig.BaseCFrame ~= nil))
+    table.insert(lines, "Rayon exclusion: "..tostring(AutoFarmConfig.ExclusionRadius))
+
+    return table.concat(lines, "\n")
+end
+
+-- =====================================================
+-- RAYFIELD UI
+-- =====================================================
+
+local guiSnapshotBefore = {}
+pcall(function()
+    for _, g in ipairs(CoreGuiService:GetChildren()) do
+        guiSnapshotBefore[g] = true
+    end
+end)
+
+local Window = Rayfield:CreateWindow({
+    Name = "Menu",
+    LoadingTitle = "Loading",
+    LoadingSubtitle = "Please wait...",
+    ConfigurationSaving = {Enabled=false},
+    Discord = {Enabled=false},
+    KeySystem = false,
+})
+
+local RayfieldGui
+pcall(function()
+    for _, g in ipairs(CoreGuiService:GetChildren()) do
+        if not guiSnapshotBefore[g] and g:IsA("ScreenGui") then
+            RayfieldGui = g
+            break
+        end
+    end
+end)
+
+if not RayfieldGui then
+    pcall(function()
+        for _, g in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+            if g.Name:lower():find("rayfield") then
+                RayfieldGui = g
+                break
+            end
+        end
+    end)
+end
+
+-- =====================================================
+-- TAB MOVEMENT
+-- =====================================================
+
+local TabMovement = Window:CreateTab("Movement", nil)
+
+TabMovement:CreateSection("Speed")
+TabMovement:CreateToggle({
+    Name="Speed Hack", CurrentValue=MovementConfig.Speed, Flag="Speed",
+    Callback=function(v)
+        MovementConfig.Speed=v MovementConfig.SpeedCurrent=16
+        if not v then local h=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") if h then h.WalkSpeed=16 end end
+        SaveCurrentConfig()
+    end,
+})
+TabMovement:CreateInput({
+    Name="Speed Value", PlaceholderText=tostring(MovementConfig.SpeedValue),
+    RemoveTextAfterFocusLost=false,
+    Callback=function(t) local n=tonumber(t) if n and n>=0 then MovementConfig.SpeedValue=n MovementConfig.SpeedCurrent=16 SaveCurrentConfig() end end,
+})
+
+TabMovement:CreateSection("Jump")
+TabMovement:CreateToggle({
+    Name="Jump Power", CurrentValue=MovementConfig.Jump, Flag="Jump",
+    Callback=function(v)
+        MovementConfig.Jump=v
+        if not v then local h=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") if h then h.JumpPower=50 end end
+        SaveCurrentConfig()
+    end,
+})
+TabMovement:CreateInput({
+    Name="Jump Value", PlaceholderText=tostring(MovementConfig.JumpValue),
+    RemoveTextAfterFocusLost=false,
+    Callback=function(t) local n=tonumber(t) if n and n>=0 then MovementConfig.JumpValue=n SaveCurrentConfig() end end,
+})
+TabMovement:CreateToggle({Name="Infinite Jump",CurrentValue=MovementConfig.InfiniteJump,Flag="InfJump",Callback=function(v) MovementConfig.InfiniteJump=v SaveCurrentConfig() end})
+
+TabMovement:CreateSection("Flight")
+TabMovement:CreateToggle({
+    Name="Fly", CurrentValue=MovementConfig.Fly, Flag="Fly",
+    Callback=function(v) MovementConfig.Fly=v if v then EnableFly() else DisableFly() end SaveCurrentConfig() end,
+})
+TabMovement:CreateInput({
+    Name="Fly Speed", PlaceholderText=tostring(MovementConfig.FlySpeed),
+    RemoveTextAfterFocusLost=false,
+    Callback=function(t) local n=tonumber(t) if n and n>0 then MovementConfig.FlySpeed=n SaveCurrentConfig() end end,
+})
+
+TabMovement:CreateSection("Advanced")
+TabMovement:CreateToggle({
+    Name="Noclip", CurrentValue=MovementConfig.Noclip, Flag="Noclip",
+    Callback=function(v) MovementConfig.Noclip=v if v then EnableNoclip() else DisableNoclip() end SaveCurrentConfig() end,
+})
+TabMovement:CreateToggle({Name="Anti-AFK",CurrentValue=MovementConfig.AntiAfk,Flag="AntiAfk",Callback=function(v) MovementConfig.AntiAfk=v SaveCurrentConfig() end})
+
+TabMovement:CreateSection("Checkpoint")
+local MovCheckLabel = TabMovement:CreateLabel("No checkpoint set")
+TabMovement:CreateButton({Name="Set Checkpoint",Callback=function()
+    local char=LocalPlayer.Character
+    if not char then return end
+    local root=char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    CheckpointCFrame=root.CFrame
+    local p=CheckpointCFrame.Position
+    local txt=math.floor(p.X)..","..math.floor(p.Y)..","..math.floor(p.Z)
+    MovCheckLabel:Set("Set: "..txt)
+    Rayfield:Notify({Title="Checkpoint",Content="Saved at "..txt,Duration=3,Image=4483362458})
+end})
+TabMovement:CreateButton({Name="TP To Checkpoint",Callback=function()
+    if not CheckpointCFrame then Rayfield:Notify({Title="Checkpoint",Content="No checkpoint set!",Duration=2,Image=4483362458}) return end
+    SafeTeleport(CheckpointCFrame)
+    Rayfield:Notify({Title="Teleported",Content="Arrived at checkpoint!",Duration=2,Image=4483362458})
+end})
+
+-- =====================================================
+-- TAB AUTO FARM
+-- =====================================================
+
+local TabAutoFarm = Window:CreateTab("Auto Farm", nil)
+
+TabAutoFarm:CreateSection("Fenetre des oeufs")
+TabAutoFarm:CreateToggle({
+    Name="Activer la fenetre des oeufs", CurrentValue=EggWindowConfig.Enabled, Flag="EggWindowEnabled",
+    Callback=function(v)
+        EggWindowConfig.Enabled = v
+        EggWindowGui.Enabled = v
+        if v then PopulateEggWindowFromScan() end
+    end,
+})
+
+local RarityStatusLabel = TabAutoFarm:CreateLabel("Raretes du jeu detectees: 0")
+TabAutoFarm:CreateButton({
+    Name="Rescanner les raretes",
+    Callback=function()
+        DiscoverGameEggRarities()
+        RefreshAllEntryPriorities()
+        RarityStatusLabel:Set("Raretes du jeu detectees: "..RarityDiscoveryStats.EggsFound)
+        Rayfield:Notify({Title="Raretes", Content=RarityDiscoveryStats.EggsFound.." oeuf(s) avec rarete identifiee", Duration=3, Image=4483362458})
+    end,
+})
+
+task.spawn(function()
+    while true do
+        task.wait(3)
+        pcall(function()
+            RarityStatusLabel:Set("Raretes du jeu detectees: "..RarityDiscoveryStats.EggsFound)
+        end)
+    end
+end)
+
+TabAutoFarm:CreateSection("Diagnostic")
+TabAutoFarm:CreateButton({
+    Name="Generer rapport debug (oeufs)",
+    Callback=function()
+        local report = GenerateDebugReport()
+        local saved = false
+        pcall(function()
+            if writefile then
+                if not isfolder("MenuConfig") then makefolder("MenuConfig") end
+                writefile("MenuConfig/EggDebug.txt", report)
+                saved = true
+            end
+        end)
+        local copied = false
+        pcall(function()
+            if setclipboard then
+                setclipboard(report)
+                copied = true
+            end
+        end)
+        print(report)
+        local msg = "Rapport affiche dans la console (F9)."
+        if saved then msg = msg.." Fichier: MenuConfig/EggDebug.txt." end
+        if copied then msg = msg.." Copie dans le presse-papier!" end
+        Rayfield:Notify({Title="Debug", Content=msg, Duration=6, Image=4483362458})
+    end,
+})
+
+TabAutoFarm:CreateSection("Teleportation rapide")
+TabAutoFarm:CreateKeybind({
+    Name = "Teleport au Spawn",
+    CurrentKeybind = "R",
+    HoldToInteract = false,
+    Flag = "TPSpawnKeybind",
+    Callback = function()
+        local target = AutoFarmConfig.BaseCFrame or CheckpointCFrame
+        if target then
+            SafeTeleport(target)
+            Rayfield:Notify({Title="Teleport", Content="Retour au spawn", Duration=2, Image=4483362458})
+        else
+            Rayfield:Notify({Title="Erreur", Content="Aucune base ou checkpoint defini", Duration=3, Image=4483362458})
+        end
+    end,
+})
+
+TabAutoFarm:CreateSection("Base")
+local BaseLabel = TabAutoFarm:CreateLabel("Base non definie")
+TabAutoFarm:CreateButton({
+    Name="Definir la base ici",
+    Callback=function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        AutoFarmConfig.BaseCFrame = root.CFrame
+        local p = root.Position
+        BaseLabel:Set("Base: "..math.floor(p.X)..", "..math.floor(p.Y)..", "..math.floor(p.Z))
+        RefreshEggWindowForZoneChange()
+        Rayfield:Notify({Title="Base", Content="Base definie", Duration=2, Image=4483362458})
+    end,
+})
+TabAutoFarm:CreateSlider({
+    Name="Rayon d'exclusion de la base", Range={0,300}, Increment=10, CurrentValue=AutoFarmConfig.ExclusionRadius, Flag="ExclusionRadius",
+    Callback=function(v)
+        AutoFarmConfig.ExclusionRadius = v
+        RefreshEggWindowForZoneChange()
+    end,
+})
+
+-- =====================================================
+-- TAB GOD
+-- =====================================================
+
+local TabGod = Window:CreateTab("God", nil)
+
+TabGod:CreateSection("Checkpoint")
+local GodCheckLabel = TabGod:CreateLabel("No checkpoint set")
+TabGod:CreateButton({Name="Set Checkpoint",Callback=function()
+    local char=LocalPlayer.Character
+    if not char then return end
+    local root=char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    CheckpointCFrame=root.CFrame
+    local p=CheckpointCFrame.Position
+    local txt=math.floor(p.X)..","..math.floor(p.Y)..","..math.floor(p.Z)
+    GodCheckLabel:Set("Set: "..txt)
+    pcall(function() MovCheckLabel:Set("Set: "..txt) end)
+    Rayfield:Notify({Title="Checkpoint",Content="Saved at "..txt,Duration=3,Image=4483362458})
+end})
+TabGod:CreateButton({Name="TP To Checkpoint",Callback=function()
+    if not CheckpointCFrame then Rayfield:Notify({Title="Checkpoint",Content="No checkpoint set!",Duration=2,Image=4483362458}) return end
+    SafeTeleport(CheckpointCFrame)
+    Rayfield:Notify({Title="Teleported",Content="Done!",Duration=2,Image=4483362458})
+end})
+
+TabGod:CreateSection("Player Actions")
+
+local function GetPlayerNamesSorted()
+    local list = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local dist = 0
+            pcall(function()
+                if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                    local lr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if lr then dist = math.floor((player.Character.HumanoidRootPart.Position-lr.Position).Magnitude) end
+                end
+            end)
+            table.insert(list, {name=player.Name, dist=dist})
+        end
+    end
+    table.sort(list, function(a,b) return a.dist < b.dist end)
+    local names = {}
+    for _, d in ipairs(list) do table.insert(names, d.name.." ("..d.dist.."m)") end
+    return names
+end
+
+local SelectedPlayer = nil
+
+local PlayerDropdown = TabGod:CreateDropdown({
+    Name="Select Player", Options=GetPlayerNamesSorted(), CurrentOption={}, Flag="SelPlayer",
+    Callback=function(opt)
+        local raw=opt[1] or opt
+        local name=raw:match("^(.-)%s*%(") or raw
+        SelectedPlayer=Players:FindFirstChild(name)
+    end,
+})
+
+AddConnection(Players.PlayerAdded:Connect(function() task.wait(0.5) pcall(function() PlayerDropdown:Refresh(GetPlayerNamesSorted()) end) end))
+AddConnection(Players.PlayerRemoving:Connect(function() task.wait(0.5) pcall(function() PlayerDropdown:Refresh(GetPlayerNamesSorted()) end) end))
+
+TabGod:CreateButton({Name="Refresh Player List",Callback=function()
+    PlayerDropdown:Refresh(GetPlayerNamesSorted())
+    Rayfield:Notify({Title="Players",Content="Refreshed!",Duration=2,Image=4483362458})
+end})
+
+TabGod:CreateSection("Individual")
+
+TabGod:CreateButton({Name="Teleport To Player",Callback=function()
+    if not SelectedPlayer then Rayfield:Notify({Title="Error",Content="Select a player first!",Duration=2,Image=4483362458}) return end
+    local ok=SafeTeleportToPlayer(SelectedPlayer)
+    Rayfield:Notify({Title=ok and "Teleported" or "Error",Content=ok and "Teleported to "..SelectedPlayer.Name or "Failed",Duration=2,Image=4483362458})
+end})
+
+TabGod:CreateButton({Name="Bring Player To You",Callback=function()
+    if not SelectedPlayer then Rayfield:Notify({Title="Error",Content="Select a player first!",Duration=2,Image=4483362458}) return end
+    local ok=SafeBringPlayer(SelectedPlayer)
+    Rayfield:Notify({Title=ok and "Brought" or "Error",Content=ok and "Brought "..SelectedPlayer.Name or "Failed",Duration=2,Image=4483362458})
+end})
+
+TabGod:CreateButton({Name="Kill Player",Callback=function()
+    if not SelectedPlayer then Rayfield:Notify({Title="Error",Content="Select a player first!",Duration=2,Image=4483362458}) return end
+    KillPlayerUniversal(SelectedPlayer)
+    Rayfield:Notify({Title="Kill",Content="Killed "..SelectedPlayer.Name,Duration=2,Image=4483362458})
+end})
+
+-- =====================================================
+-- REMOTE HIT SECTION
+-- =====================================================
+
+TabGod:CreateSection("Remote Hit")
+
+TabGod:CreateInput({
+    Name="Degats par coup",
+    PlaceholderText="25",
+    RemoveTextAfterFocusLost=false,
+    Callback=function(t)
+        local n=tonumber(t)
+        if n and n>0 then RemoteHitConfig.Damage=n end
+    end,
+})
+
+TabGod:CreateInput({
+    Name="Nombre de coups",
+    PlaceholderText="1",
+    RemoveTextAfterFocusLost=false,
+    Callback=function(t)
+        local n=tonumber(t)
+        if n and n>0 then RemoteHitConfig.Repeats=math.floor(n) end
+    end,
+})
+
+TabGod:CreateButton({
+    Name="Frapper le joueur selectionne",
+    Callback=function()
+        if not SelectedPlayer then
+            Rayfield:Notify({Title="Error",Content="Selectionne un joueur d'abord!",Duration=2,Image=4483362458})
+            return
+        end
+        if not SelectedPlayer.Character then
+            Rayfield:Notify({Title="Error",Content="Le joueur n'a pas de personnage!",Duration=2,Image=4483362458})
+            return
+        end
+        StartRemoteHit(SelectedPlayer, RemoteHitConfig.Damage, RemoteHitConfig.Repeats)
+        local h=SelectedPlayer.Character:FindFirstChild("Humanoid")
+        local hpText=h and math.floor(h.Health).."/"..math.floor(h.MaxHealth) or "?"
+        Rayfield:Notify({
+            Title="Coup envoye!",
+            Content=SelectedPlayer.Name.." | "..RemoteHitConfig.Damage.." dmg x"..RemoteHitConfig.Repeats.." | HP: "..hpText,
+            Duration=3,Image=4483362458,
+        })
+    end,
+})
+
+TabGod:CreateButton({
+    Name="Spam Hit (10 coups)",
+    Callback=function()
+        if not SelectedPlayer then
+            Rayfield:Notify({Title="Error",Content="Selectionne un joueur d'abord!",Duration=2,Image=4483362458})
+            return
+        end
+        if not SelectedPlayer.Character then
+            Rayfield:Notify({Title="Error",Content="Le joueur n'a pas de personnage!",Duration=2,Image=4483362458})
+            return
+        end
+        StartRemoteHit(SelectedPlayer, RemoteHitConfig.Damage, 10)
+        Rayfield:Notify({
+            Title="Spam Hit!",
+            Content="10 coups envoyes sur "..SelectedPlayer.Name,
+            Duration=2,Image=4483362458,
+        })
+    end,
+})
+
+TabGod:CreateButton({
+    Name="One Hit Kill",
+    Callback=function()
+        if not SelectedPlayer then
+            Rayfield:Notify({Title="Error",Content="Selectionne un joueur d'abord!",Duration=2,Image=4483362458})
+            return
+        end
+        if not SelectedPlayer.Character then
+            Rayfield:Notify({Title="Error",Content="Le joueur n'a pas de personnage!",Duration=2,Image=4483362458})
+            return
+        end
+        StartRemoteHit(SelectedPlayer, 999999, 5)
+        Rayfield:Notify({
+            Title="One Hit Kill!",
+            Content="999999 dmg envoye sur "..SelectedPlayer.Name,
+            Duration=2,Image=4483362458,
+        })
+    end,
+})
+
+TabGod:CreateButton({
+    Name="Frapper TOUS les joueurs",
+    Callback=function()
+        local count=0
+        for _,player in pairs(Players:GetPlayers()) do
+            if player~=LocalPlayer and player.Character then
+                task.spawn(function()
+                    RemoteHitPlayer(player, RemoteHitConfig.Damage)
+                end)
+                count=count+1
+            end
+        end
+        Rayfield:Notify({
+            Title="Hit All!",
+            Content=count.." joueurs frappes avec "..RemoteHitConfig.Damage.." dmg",
+            Duration=3,Image=4483362458,
+        })
+    end,
+})
+
+TabGod:CreateButton({
+    Name="One Hit Kill TOUS",
+    Callback=function()
+        local count=0
+        for _,player in pairs(Players:GetPlayers()) do
+            if player~=LocalPlayer and player.Character then
+                task.spawn(function()
+                    RemoteHitPlayer(player, 999999)
+                end)
+                count=count+1
+            end
+        end
+        Rayfield:Notify({
+            Title="One Hit Kill All!",
+            Content=count.." joueurs elimines",
+            Duration=2,Image=4483362458,
+        })
+    end,
+})
+
+-- =====================================================
+-- MASS ACTIONS
+-- =====================================================
+
+TabGod:CreateSection("Mass Actions")
+
+TabGod:CreateButton({Name="Kill All Players",Callback=function()
+    local killed=0
+    for _,p in pairs(Players:GetPlayers()) do
+        if p~=LocalPlayer and p.Character then KillPlayerUniversal(p) killed=killed+1 task.wait(0.1) end
+    end
+    Rayfield:Notify({Title="Kill All",Content=killed.." players killed",Duration=2,Image=4483362458})
+end})
+
+TabGod:CreateButton({Name="Teleport All To You",Callback=function()
+    local tped=0
+    for _,p in pairs(Players:GetPlayers()) do
+        if p~=LocalPlayer and p.Character then SafeBringPlayer(p) tped=tped+1 task.wait(0.3) end
+    end
+    Rayfield:Notify({Title="Teleport All",Content=tped.." players brought",Duration=2,Image=4483362458})
+end})
+
+-- =====================================================
+-- INVISIBILITY
+-- =====================================================
+
+TabGod:CreateSection("Invisibility")
+
+TabGod:CreateToggle({
+    Name="Enable Invisibility", CurrentValue=InvisibilityConfig.Enabled, Flag="InvisEnabled",
+    Callback=function(v) InvisibilityConfig.Enabled=v if v then EnableInvisibility() else DisableInvisibility() end end,
+})
+
+local InvisDropdown = TabGod:CreateDropdown({
+    Name="Visible To (exclude from invis)", Options={}, CurrentOption={},
+    MultipleOptions=true, Flag="InvisExclude",
+    Callback=function(opts)
+        InvisibilityConfig.ExcludedPlayers={}
+        for _,o in pairs(opts) do InvisibilityConfig.ExcludedPlayers[o]=true end
+        if InvisibilityConfig.Enabled then DisableInvisibility() task.wait(0.1) EnableInvisibility() end
+    end,
+})
+
+task.spawn(function()
+    while true do
+        wait(2)
+        pcall(function()
+            local names={}
+            for _,p in pairs(Players:GetPlayers()) do if p~=LocalPlayer then table.insert(names,p.Name) end end
+            InvisDropdown:Refresh(names)
+        end)
+    end
+end)
+
+-- =====================================================
+-- TAB MISC
+-- =====================================================
+
+local TabMisc = Window:CreateTab("Misc", nil)
+
+TabMisc:CreateSection("Menu Settings")
+
+TabMisc:CreateKeybind({
+    Name = "Toggle Menu Keybind",
+    CurrentKeybind = "RightShift",
+    HoldToInteract = false,
+    Flag = "ToggleMenuKeybind",
+    Callback = function()
+        if RayfieldGui then
+            pcall(function() RayfieldGui.Enabled = not RayfieldGui.Enabled end)
+        end
+    end,
+})
+
+TabMisc:CreateSection("Anti Kick")
+TabMisc:CreateToggle({
+    Name="Activer Anti Kick", CurrentValue=AntiKickConfig.Enabled, Flag="AntiKick",
+    Callback=function(v) AntiKickConfig.Enabled = v SaveCurrentConfig() end,
+})
+
+TabMisc:CreateSection("Teleportation")
+TabMisc:CreateToggle({
+    Name="Corriger l'endurance apres TP (90)", CurrentValue=StaminaFixConfig.Enabled, Flag="StaminaFix",
+    Callback=function(v) StaminaFixConfig.Enabled = v SaveCurrentConfig() end,
+})
+
+-- =====================================================
+-- ANTI KICK LOOP
+-- =====================================================
+
+task.spawn(function()
+    while true do
+        task.wait(60 * 8)
+        if AntiKickConfig.Enabled then
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new(0, 0), Camera.CFrame)
+            end)
+        end
+    end
+end)
+
+-- =====================================================
+-- KEYBINDS / INFINITE JUMP
+-- =====================================================
+
+AddConnection(UserInputService.JumpRequest:Connect(function()
+    if MovementConfig.InfiniteJump then
+        local char=LocalPlayer.Character
+        if char then
+            local h=char:FindFirstChild("Humanoid")
+            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+        end
+    end
+end))
+
+-- =====================================================
+-- ANTI AFK
+-- =====================================================
+
+task.spawn(function()
+    while true do
+        task.wait(19)
+        if MovementConfig.AntiAfk and LocalPlayer.Character then
+            local h=LocalPlayer.Character:FindFirstChild("Humanoid")
+            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) task.wait(0.2) h:ChangeState(Enum.HumanoidStateType.Idle) end
+        end
+    end
+end)
+
+-- =====================================================
+-- MAIN LOOP
+-- =====================================================
+
+AddConnection(RunService.RenderStepped:Connect(function()
+    pcall(function()
+        FPSCounter = FPSCounter + 1
+        if tick() - LastFPSUpdate >= 1 then
+            FPSText.Text = FPSCounter.." FPS"
+            FPSCounter = 0 LastFPSUpdate = tick()
+        end
+        if MovementConfig.Fly then UpdateFly() end
+        UpdateSpeed()
+        if InvisibilityConfig.Enabled then EnableInvisibility() end
+    end)
+end))
+
+AddConnection(LocalPlayer.CharacterAdded:Connect(function(char)
+    wait(0.5)
+    MovementConfig.SpeedCurrent = 16
+    local h = char:FindFirstChild("Humanoid")
+    if h then h.WalkSpeed=16 h.JumpPower=50 end
+    if InvisibilityConfig.Enabled then task.wait(1) EnableInvisibility() end
+    if MovementConfig.Fly then task.wait(0.5) EnableFly() end
+    if MovementConfig.Noclip then task.wait(0.5) EnableNoclip() end
+end))
+
+if MovementConfig.Fly then EnableFly() end
+if MovementConfig.Noclip then EnableNoclip() end
+
+Rayfield:Notify({
+    Title = "Script Loaded",
+    Content = "Movement | Auto Farm | God | Misc",
+    Duration = 4, Image = 4483362458,
+})
+
+end)
+
+if not success then
+    warn("SCRIPT ERROR:", err)
+end
